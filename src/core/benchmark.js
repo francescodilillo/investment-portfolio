@@ -1,1 +1,0 @@
-// Calculates benchmark performance.
