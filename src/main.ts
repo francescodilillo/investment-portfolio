@@ -1,0 +1,1 @@
+import "./styles.css"; import {mountDashboard} from "./ui/dashboard"; const root=document.querySelector<HTMLElement>("#app"); if(!root)throw new Error("The dashboard root is missing."); mountDashboard(root);
