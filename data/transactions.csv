@@ -1,1 +1,1 @@
-date,instrument,action,quantity,price,currency,broker,fees
+Symbol,Date,Quantity,Price,Price Currency,Fees Percentage,Fees Amount,Fees Currency
