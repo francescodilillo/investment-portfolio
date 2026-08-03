@@ -1,0 +1,9 @@
+# Keep your private portfolio.yml outside this repository.
+currency: EUR
+instruments:
+  VWCE:
+    name: Vanguard FTSE All-World UCITS ETF
+    currentPrice: 0
+# actionAliases:
+#   PURCHASE: BUY
+#   SALE: SELL
