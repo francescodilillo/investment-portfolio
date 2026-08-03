@@ -1,6 +1,6 @@
 # Investment Dashboard
 
-A local-first investment dashboard. It reads transaction history and portfolio configuration files selected from your computer, reconstructs open positions with the documented average-cost method, and displays foundation KPIs. Nothing is uploaded and this repository contains no personal financial data.
+A local-first investment dashboard. It reads transaction history and portfolio configuration files selected from your computer. Nothing is uploaded and this repository contains no personal financial data.
 
 ## Run locally
 
@@ -17,19 +17,19 @@ Select a transaction CSV and your private `portfolio.yml`, then choose **Build d
 
 ## Transaction CSV format
 
-Headers are case- and space-insensitive:
+The importer expects these columns, in this exact order:
 
 ```csv
-date,instrument,action,quantity,price,currency,broker,fees
-2025-01-10,VWCE,BUY,10,120.50,EUR,Example Broker,0
-2025-02-10,VWCE,SELL,2,125.00,EUR,Example Broker,0
+Symbol,Date,Quantity,Price,Price Currency,Fees Percentage,Fees Amount,Fees Currency
+VWCE,2025-01-10,10,120.50,EUR,0,0,EUR
+VWCE,2025-02-10,-2,125.00,EUR,0,0,EUR
 ```
 
-Dates use `YYYY-MM-DD`. Supported actions are `BUY`, `SELL`, `CONTRIBUTION`, `WITHDRAWAL`, and `EMPLOYER_EQUITY`; map broker-specific labels through `actionAliases`. All transaction currencies must equal the configured YAML currency because exchange-rate assumptions are not implemented. Fees are displayed as source data; their financial treatment is not inferred because it is not documented in the project formulas.
+- A positive `Quantity` is a buy; a negative `Quantity` is a sell.
+- `Price Currency` and `Fees Currency` must equal the configured YAML currency because exchange-rate assumptions are not implemented.
+- `Fees Percentage` and `Fees Amount` are imported; the fee amount is displayed. Its financial treatment is not inferred because the project formulas do not specify one.
 
 ## portfolio.yml format
-
-Current prices and portfolio-specific assumptions stay in your local YAML file:
 
 ```yaml
 currency: EUR
@@ -37,8 +37,6 @@ instruments:
   VWCE:
     name: Vanguard FTSE All-World UCITS ETF
     currentPrice: 132.45
-actionAliases:
-  PURCHASE: BUY
 ```
 
 `currentPrice` is required for every open instrument. The app contains no embedded portfolio values.
