@@ -1,44 +1,13 @@
-import { parse } from "yaml";
-import type { InstrumentConfig, PortfolioConfig, TransactionAction } from "./types";
-
-const SUPPORTED_ACTIONS = new Set<TransactionAction>(["BUY", "SELL", "CONTRIBUTION", "WITHDRAWAL", "EMPLOYER_EQUITY"]);
-
-/** Parses and validates the locally selected portfolio configuration. */
-export function parsePortfolioConfig(source: string): PortfolioConfig {
-  const raw: unknown = parse(source);
-  if (!isRecord(raw)) throw new Error("portfolio.yml must contain a mapping at its root.");
-  const currency = stringValue(raw.currency, "currency").toUpperCase();
-  if (!isRecord(raw.instruments) || Object.keys(raw.instruments).length === 0) {
-    throw new Error("portfolio.yml must define at least one instrument under instruments.");
-  }
-  const instruments: Record<string, InstrumentConfig> = {};
-  for (const [ticker, value] of Object.entries(raw.instruments)) {
-    if (!isRecord(value)) throw new Error(`Instrument ${ticker} must be a mapping.`);
-    const currentPrice = numberValue(value.currentPrice, `instruments.${ticker}.currentPrice`);
-    if (currentPrice < 0) throw new Error(`instruments.${ticker}.currentPrice cannot be negative.`);
-    instruments[ticker.trim().toUpperCase()] = { currentPrice, ...(typeof value.name === "string" ? { name: value.name.trim() } : {}) };
-  }
-  const actionAliases = parseActionAliases(raw.actionAliases);
-  return { currency, instruments, ...(actionAliases ? { actionAliases } : {}) };
+import {parse} from "yaml"; import type {InstrumentConfig,PortfolioConfig} from "./types";
+/** Parses the authoritative local portfolio.yml format, including base currency, assets, prices, and exchange rates. */
+export function parsePortfolioConfig(source:string):PortfolioConfig {
+ const raw=parse(source) as Record<string,unknown>; if(!record(raw)||!record(raw.portfolio))throw new Error("portfolio.yml must contain a portfolio mapping.");
+ const currency=text(raw.portfolio.base_currency,"portfolio.base_currency").toUpperCase();
+ const rates:Record<string,number>={[currency]:1}; if(raw.exchange_rates!==undefined){if(!record(raw.exchange_rates))throw new Error("exchange_rates must be a mapping.");for(const [code,value] of Object.entries(raw.exchange_rates)){const rate=num(value,`exchange_rates.${code}`);if(rate<=0)throw new Error(`exchange_rates.${code} must be positive.`);rates[code.toUpperCase()]=rate;}}
+ if(!record(raw.assets))throw new Error("portfolio.yml must contain an assets mapping.");
+ if(!record(raw.current_prices))throw new Error("portfolio.yml must contain a current_prices mapping.");
+ const instruments:Record<string,InstrumentConfig>={};
+ for(const [ticker,asset] of Object.entries(raw.assets)){if(!record(asset))throw new Error(`assets.${ticker} must be a mapping.`);const price=raw.current_prices[ticker];if(!record(price))throw new Error(`current_prices.${ticker} is required.`);const code=text(price.currency,`current_prices.${ticker}.currency`).toUpperCase(),rate=rates[code];if(rate===undefined)throw new Error(`An exchange_rates.${code} value is required.`);instruments[ticker.toUpperCase()]={name:typeof asset.name==="string"?asset.name:ticker,currentPrice:num(price.value,`current_prices.${ticker}.value`)*rate};}
+ return {currency,instruments,exchangeRates:rates};
 }
-function parseActionAliases(value: unknown): Record<string, TransactionAction> | undefined {
-  if (value === undefined) return undefined;
-  if (!isRecord(value)) throw new Error("actionAliases must be a mapping when provided.");
-  const aliases: Record<string, TransactionAction> = {};
-  for (const [source, target] of Object.entries(value)) {
-    if (typeof target !== "string" || !SUPPORTED_ACTIONS.has(target.toUpperCase() as TransactionAction)) {
-      throw new Error(`actionAliases.${source} must map to a supported action.`);
-    }
-    aliases[source.trim().toUpperCase()] = target.toUpperCase() as TransactionAction;
-  }
-  return aliases;
-}
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function stringValue(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim() === "") throw new Error(`${field} must be a non-empty string.`);
-  return value.trim();
-}
-function numberValue(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${field} must be a finite number.`);
-  return value;
-}
+function record(v:unknown):v is Record<string,unknown>{return typeof v==="object"&&v!==null&&!Array.isArray(v);}function text(v:unknown,field:string):string{if(typeof v!=="string"||!v.trim())throw new Error(`${field} must be a non-empty string.`);return v.trim();}function num(v:unknown,field:string):number{if(typeof v!=="number"||!Number.isFinite(v))throw new Error(`${field} must be a finite number.`);return v;}
