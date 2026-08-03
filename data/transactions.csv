@@ -1,1 +1,1 @@
-date,instrument,transaction_type,quantity,price,currency,broker,fees
+date,instrument,action,quantity,price,currency,broker,fees
