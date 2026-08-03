@@ -7,9 +7,4 @@ assets:
     name: Tencent Holdings
     asset_class: Stock
     origin: employer_rsu
-current_prices:
-  "700.HK":
-    value: 0
-    currency: HKD
-exchange_rates:
-  HKD: 0
+    # quote_symbol: "0700.HK"  # optional override for Yahoo Finance
