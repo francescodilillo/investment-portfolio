@@ -1,9 +1,15 @@
-# Keep your private portfolio.yml outside this repository.
-currency: EUR
-instruments:
-  VWCE:
-    name: Vanguard FTSE All-World UCITS ETF
-    currentPrice: 0
-# actionAliases:
-#   PURCHASE: BUY
-#   SALE: SELL
+version: 1
+portfolio:
+  base_currency: EUR
+  cost_basis_method: average_cost
+assets:
+  "700.HK":
+    name: Tencent Holdings
+    asset_class: Stock
+    origin: employer_rsu
+current_prices:
+  "700.HK":
+    value: 0
+    currency: HKD
+exchange_rates:
+  HKD: 0
