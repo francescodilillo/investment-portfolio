@@ -1,46 +1,34 @@
 # Investment Dashboard
 
-A local-first investment dashboard. It reads transaction history and portfolio configuration files selected from your computer. Nothing is uploaded and this repository contains no personal financial data.
+A local-first investment dashboard: files stay in the browser and are never uploaded.
 
-## Run locally
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-Create a production build with `npm run build`.
+## Local files
 
-## Load your files
+Select your broker CSV and private `portfolio.yml`.
 
-Select a transaction CSV and your private `portfolio.yml`, then choose **Build dashboard**. Both files are parsed only in the browser and are not stored or committed. `portfolio.yml` is ignored by Git; start with `portfolio.example.yml`.
+The CSV headers are: `Symbol, Date, Quantity, Price, Price Currency, Fees Percentage, Fees Amount, Fees Currency`. Positive quantity is a buy and negative quantity is a sell. Dates use `DD/MM/YYYY`.
 
-## Transaction CSV format
-
-The importer expects these columns, in this exact order:
-
-```csv
-Symbol,Date,Quantity,Price,Price Currency,Fees Percentage,Fees Amount,Fees Currency
-VWCE,2025-01-10,10,120.50,EUR,0,0,EUR
-VWCE,2025-02-10,-2,125.00,EUR,0,0,EUR
-```
-
-- A positive `Quantity` is a buy; a negative `Quantity` is a sell.
-- `Price Currency` and `Fees Currency` must equal the configured YAML currency because exchange-rate assumptions are not implemented.
-- `Fees Percentage` and `Fees Amount` are imported; the fee amount is displayed. Its financial treatment is not inferred because the project formulas do not specify one.
-
-## portfolio.yml format
+Your YAML follows the documented structure:
 
 ```yaml
-currency: EUR
-instruments:
-  VWCE:
-    name: Vanguard FTSE All-World UCITS ETF
-    currentPrice: 132.45
+portfolio:
+  base_currency: EUR
+assets:
+  "700.HK":
+    name: Tencent Holdings
+current_prices:
+  "700.HK":
+    value: 419
+    currency: HKD
+exchange_rates:
+  HKD: 0.12 # EUR value of one HKD; use your local assumption
 ```
 
-`currentPrice` is required for every open instrument. The app contains no embedded portfolio values.
-
-## Scope
-
-Implemented: import, normalization, average-cost reconstruction, realized and unrealized gains, foundation KPIs, holdings, transaction history, allocation, and top-holdings charts. Forecasting, benchmarks, Monte Carlo, tax, dividends, and advanced analytics are deferred.
+Current prices and exchange rates are local portfolio assumptions. The app requires a `current_prices` entry for each open asset and an `exchange_rates` entry for every non-base currency. No portfolio values are embedded in the application.
