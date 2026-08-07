@@ -6,6 +6,21 @@ const YAHOO_CHART = "/api/yahoo/v8/finance/chart";
 const COINGECKO = "https://api.coingecko.com/api/v3/simple/price";
 const CRYPTO_CURRENCIES = new Set(["BTC", "ETH"]);
 const CRYPTO_IDS: Record<string, string> = { BTC: "bitcoin", ETH: "ethereum" };
+const YAHOO_QUOTE = "/api/yahoo/v7/finance/quote";
+
+/** Retries a fetch-like operation on 429 responses with exponential backoff. */
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 800): Promise<T> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const isRateLimited = error instanceof Error && error.message.includes("(429)");
+      if (!isRateLimited || attempt === retries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs * (attempt + 1)));
+    }
+  }
+  throw new Error("Unreachable");
+}
 
 export interface MarketSnapshot {
   fetchedAt: Date;
@@ -83,19 +98,42 @@ export async function fetchExchangeRatesToEur(currencies: string[]): Promise<Rec
   return rates;
 }
 
+/** Fetches quotes for multiple Yahoo symbols in a single request to avoid per-ticker rate limits. */
+async function fetchYahooQuotesBatch(symbols: string[]): Promise<Record<string, { price: number; currency: string }>> {
+  if (symbols.length === 0) return {};
+  return withRetry(async () => {
+    const params = new URLSearchParams({ symbols: symbols.join(",") });
+    const response = await fetch(`${YAHOO_QUOTE}?${params}`);
+    if (!response.ok) throw new Error(`Batch price lookup failed (${response.status}).`);
+
+    const data = (await response.json()) as {
+      quoteResponse: { result: Array<{ symbol: string; regularMarketPrice?: number; currency?: string }>; error?: unknown };
+    };
+    const result: Record<string, { price: number; currency: string }> = {};
+    for (const quote of data.quoteResponse.result) {
+      if (quote.regularMarketPrice && quote.currency) {
+        result[quote.symbol] = { price: quote.regularMarketPrice, currency: quote.currency.toUpperCase() };
+      }
+    }
+    return result;
+  });
+}
+
 /** Fetches the latest price and trading currency for a Yahoo Finance symbol. */
 export async function fetchYahooQuote(symbol: string): Promise<{ price: number; currency: string }> {
-  const params = new URLSearchParams({ interval: "1d", range: "1d" });
-  const response = await fetch(`${YAHOO_CHART}/${encodeURIComponent(symbol)}?${params}`);
-  if (!response.ok) throw new Error(`Price lookup failed for ${symbol} (${response.status}).`);
+  return withRetry(async () => {
+    const params = new URLSearchParams({ interval: "1d", range: "1d" });
+    const response = await fetch(`${YAHOO_CHART}/${encodeURIComponent(symbol)}?${params}`);
+    if (!response.ok) throw new Error(`Price lookup failed for ${symbol} (${response.status}).`);
 
-  const data = (await response.json()) as YahooChartResponse;
-  const meta = data.chart.result?.[0]?.meta;
-  if (!meta?.regularMarketPrice || !meta.currency) {
-    const detail = data.chart.error?.description ?? "No quote returned.";
-    throw new Error(`Price lookup failed for ${symbol}: ${detail}`);
-  }
-  return { price: meta.regularMarketPrice, currency: meta.currency.toUpperCase() };
+    const data = (await response.json()) as YahooChartResponse;
+    const meta = data.chart.result?.[0]?.meta;
+    if (!meta?.regularMarketPrice || !meta.currency) {
+      const detail = data.chart.error?.description ?? "No quote returned.";
+      throw new Error(`Price lookup failed for ${symbol}: ${detail}`);
+    }
+    return { price: meta.regularMarketPrice, currency: meta.currency.toUpperCase() };
+  });
 }
 
 /** Resolves live prices and FX rates, with optional manual overrides from portfolio.yml. */
@@ -114,46 +152,69 @@ export async function fetchMarketSnapshot(
   };
 
   const instruments: Record<string, InstrumentConfig> = {};
-  const quoteResults = await Promise.all(
-    tickers.map(async (ticker) => {
+
+  // Validate all tickers have asset entries up front.
+  for (const ticker of tickers) {
+    if (!structure.assets[ticker]) throw new Error(`portfolio.yml is missing assets.${ticker}.`);
+  }
+
+  // Split tickers into manual-priced, crypto, and Yahoo-quoted groups.
+  const manualTickers = tickers.filter((t) => manualPrices[t]);
+  const cryptoTickers = tickers.filter((t) => !manualPrices[t] && CRYPTO_CURRENCIES.has(t.toUpperCase()));
+  const yahooTickers = tickers.filter((t) => !manualPrices[t] && !CRYPTO_CURRENCIES.has(t.toUpperCase()));
+
+  // Manual prices: just convert using existing/fetched rates.
+  for (const ticker of manualTickers) {
+    const asset = structure.assets[ticker];
+    const manual = manualPrices[ticker];
+    const code = manual.currency.toUpperCase();
+    if (exchangeRates[code] === undefined) {
+      exchangeRates = { ...exchangeRates, ...(await fetchExchangeRatesToEur([code])) };
+    }
+    const rate = exchangeRates[code];
+    if (rate === undefined) throw new Error(`No exchange rate available for ${code}.`);
+    instruments[ticker] = { name: asset.name, currentPrice: manual.value * rate };
+  }
+
+  // Crypto: fetch all needed crypto rates in one CoinGecko call.
+  if (cryptoTickers.length > 0) {
+    const upperCryptoTickers = cryptoTickers.map((t) => t.toUpperCase());
+    const missing = upperCryptoTickers.filter((c) => exchangeRates[c] === undefined);
+    if (missing.length > 0) {
+      exchangeRates = { ...exchangeRates, ...(await fetchCryptoRatesToEur(missing)) };
+    }
+    for (const ticker of cryptoTickers) {
       const asset = structure.assets[ticker];
-      if (!asset) throw new Error(`portfolio.yml is missing assets.${ticker}.`);
-
-      const manual = manualPrices[ticker];
-      if (manual) {
-        const code = manual.currency.toUpperCase();
-        if (exchangeRates[code] === undefined) {
-          exchangeRates = { ...exchangeRates, ...(await fetchExchangeRatesToEur([code])) };
-        }
-        const rate = exchangeRates[code];
-        if (rate === undefined) throw new Error(`No exchange rate available for ${code}.`);
-        return { ticker, priceEur: manual.value * rate, name: asset.name };
-      }
-
       const upper = ticker.toUpperCase();
-      if (CRYPTO_CURRENCIES.has(upper)) {
-        if (exchangeRates[upper] === undefined) {
-          exchangeRates = { ...exchangeRates, ...(await fetchCryptoRatesToEur([upper])) };
-        }
-        const rate = exchangeRates[upper];
-        if (rate === undefined) throw new Error(`No exchange rate available for ${upper}.`);
-        return { ticker, priceEur: rate, name: asset.name ?? ticker };
-      }
+      const rate = exchangeRates[upper];
+      if (rate === undefined) throw new Error(`No exchange rate available for ${upper}.`);
+      instruments[ticker] = { name: asset.name ?? ticker, currentPrice: rate };
+    }
+  }
 
+  // Yahoo: resolve symbols and fetch all quotes in a single batched request.
+  if (yahooTickers.length > 0) {
+    const symbolToTicker = new Map<string, string>();
+    for (const ticker of yahooTickers) {
+      const asset = structure.assets[ticker];
       const symbol = resolveQuoteSymbol(ticker, asset.quoteSymbol);
-      const quote = await fetchYahooQuote(symbol);
+      symbolToTicker.set(symbol, ticker);
+    }
+
+    const quotes = await fetchYahooQuotesBatch([...symbolToTicker.keys()]);
+
+    for (const [symbol, ticker] of symbolToTicker) {
+      const quote = quotes[symbol];
+      if (!quote) throw new Error(`Price lookup failed for ${symbol}: no quote returned.`);
+      const asset = structure.assets[ticker];
       const code = quote.currency.toUpperCase();
       if (exchangeRates[code] === undefined) {
         exchangeRates = { ...exchangeRates, ...(await fetchExchangeRatesToEur([code])) };
       }
       const rate = exchangeRates[code];
       if (rate === undefined) throw new Error(`No exchange rate available for ${quote.currency}.`);
-      return { ticker, priceEur: quote.price * rate, name: asset.name ?? ticker };
-    }),
-  );
-
-  for (const { ticker, priceEur, name } of quoteResults) {
-    instruments[ticker] = { name, currentPrice: priceEur };
+      instruments[ticker] = { name: asset.name ?? ticker, currentPrice: quote.price * rate };
+    }
   }
 
   return { fetchedAt: new Date(), exchangeRates, instruments };
