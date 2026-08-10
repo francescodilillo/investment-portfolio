@@ -7,16 +7,42 @@ const COINGECKO = "https://api.coingecko.com/api/v3/simple/price";
 const CRYPTO_CURRENCIES = new Set(["BTC", "ETH"]);
 const CRYPTO_IDS: Record<string, string> = { BTC: "bitcoin", ETH: "ethereum" };
 const YAHOO_QUOTE = "/api/yahoo/v7/finance/quote";
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const CACHE_PREFIX = "market-cache:";
 
-/** Retries a fetch-like operation on 429 responses with exponential backoff. */
-async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 800): Promise<T> {
+interface CacheEntry<T> { value: T; fetchedAt: number; }
+
+function readCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const entry = JSON.parse(raw) as CacheEntry<T>;
+    if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
+    return entry.value;
+  } catch {
+    return null; // corrupt or unavailable storage — just refetch
+  }
+}
+
+function writeCache<T>(key: string, value: T): void {
+  try {
+    const entry: CacheEntry<T> = { value, fetchedAt: Date.now() };
+    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(entry));
+  } catch {
+    // storage full or unavailable — caching is best-effort, not required
+  }
+}
+
+/** Retries a fetch-like operation on 429 responses with exponential backoff + jitter. */
+async function withRetry<T>(fn: () => Promise<T>, retries = 5, delayMs = 1500): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (error) {
       const isRateLimited = error instanceof Error && error.message.includes("(429)");
       if (!isRateLimited || attempt === retries) throw error;
-      await new Promise((resolve) => setTimeout(resolve, delayMs * (attempt + 1)));
+      const jitter = Math.random() * 400;
+      await new Promise((resolve) => setTimeout(resolve, delayMs * 2 ** attempt + jitter));
     }
   }
   throw new Error("Unreachable");
@@ -101,7 +127,12 @@ export async function fetchExchangeRatesToEur(currencies: string[]): Promise<Rec
 /** Fetches quotes for multiple Yahoo symbols in a single request to avoid per-ticker rate limits. */
 async function fetchYahooQuotesBatch(symbols: string[]): Promise<Record<string, { price: number; currency: string }>> {
   if (symbols.length === 0) return {};
-  return withRetry(async () => {
+
+  const cacheKey = `quotes:${[...symbols].sort().join(",")}`;
+  const cached = readCache<Record<string, { price: number; currency: string }>>(cacheKey);
+  if (cached) return cached;
+
+  const result = await withRetry(async () => {
     const params = new URLSearchParams({ symbols: symbols.join(",") });
     const response = await fetch(`${YAHOO_QUOTE}?${params}`);
     if (!response.ok) throw new Error(`Batch price lookup failed (${response.status}).`);
@@ -109,14 +140,17 @@ async function fetchYahooQuotesBatch(symbols: string[]): Promise<Record<string, 
     const data = (await response.json()) as {
       quoteResponse: { result: Array<{ symbol: string; regularMarketPrice?: number; currency?: string }>; error?: unknown };
     };
-    const result: Record<string, { price: number; currency: string }> = {};
+    const out: Record<string, { price: number; currency: string }> = {};
     for (const quote of data.quoteResponse.result) {
       if (quote.regularMarketPrice && quote.currency) {
-        result[quote.symbol] = { price: quote.regularMarketPrice, currency: quote.currency.toUpperCase() };
+        out[quote.symbol] = { price: quote.regularMarketPrice, currency: quote.currency.toUpperCase() };
       }
     }
-    return result;
+    return out;
   });
+
+  writeCache(cacheKey, result);
+  return result;
 }
 
 /** Fetches the latest price and trading currency for a Yahoo Finance symbol. */
