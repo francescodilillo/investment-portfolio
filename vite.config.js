@@ -8,6 +8,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/yahoo/, ""),
       },
+      "/api/stooq": {
+        target: "https://stooq.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/stooq/, ""),
+      },
     },
   },
   preview: {
@@ -16,6 +21,11 @@ export default defineConfig({
         target: "https://query1.finance.yahoo.com",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/yahoo/, ""),
+      },
+      "/api/stooq": {
+        target: "https://stooq.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/stooq/, ""),
       },
     },
   },
