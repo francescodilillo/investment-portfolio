@@ -19,7 +19,7 @@ export function mountDashboard(root: HTMLElement): void {
     const yml = root.querySelector<HTMLInputElement>("#yml")?.files?.[0];
     if (!csv || !yml) return replace(root, onboarding("Choose both a transaction CSV and portfolio.yml."));
 
-    replace(root, loading("Fetching live prices and exchange rates…"));
+    replace(root, loading("Fetching live prices — this can take ~1–2 minutes on first load due to API rate limits…"));
     try {
       const csvText = await csv.text();
       const structure = parsePortfolioStructure(await yml.text());

@@ -6,9 +6,19 @@ const YAHOO_CHART = "/api/yahoo/v8/finance/chart";
 const COINGECKO = "https://api.coingecko.com/api/v3/simple/price";
 const CRYPTO_CURRENCIES = new Set(["BTC", "ETH"]);
 const CRYPTO_IDS: Record<string, string> = { BTC: "bitcoin", ETH: "ethereum" };
-const YAHOO_QUOTE = "/api/yahoo/v7/finance/quote";
+// const YAHOO_QUOTE = "/api/yahoo/v7/finance/quote";
+const TWELVE_DATA_QUOTE = "https://api.twelvedata.com/quote";
+const TWELVE_DATA_KEY = import.meta.env.VITE_TWELVEDATA_API_KEY as string | undefined;
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const CACHE_PREFIX = "market-cache:";
+const TWELVE_DATA_CHUNK_SIZE = 7;
+const TWELVE_DATA_CHUNK_DELAY_MS = 61_000;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 interface CacheEntry<T> { value: T; fetchedAt: number; }
 
@@ -124,30 +134,131 @@ export async function fetchExchangeRatesToEur(currencies: string[]): Promise<Rec
   return rates;
 }
 
-/** Fetches quotes for multiple Yahoo symbols in a single request to avoid per-ticker rate limits. */
-async function fetchYahooQuotesBatch(symbols: string[]): Promise<Record<string, { price: number; currency: string }>> {
+async function fetchTwelveDataQuoteChunk(
+  symbols: string[],
+): Promise<Record<string, { price: number; currency: string }>> {
+  return withRetry(async () => {
+    const params = new URLSearchParams({
+      symbol: symbols.join(","),
+      apikey: TWELVE_DATA_KEY!,
+    });
+
+    const response = await fetch(`${TWELVE_DATA_QUOTE}?${params}`);
+    if (!response.ok) {
+      throw new Error(`Batch price lookup failed (${response.status}).`);
+    }
+
+    const data = await response.json();
+
+    const quotes: Record<string, TwelveDataQuote> =
+      symbols.length === 1 ? { [symbols[0]]: data } : data;
+
+    const out: Record<string, { price: number; currency: string }> = {};
+
+    for (const [symbol, quote] of Object.entries(quotes)) {
+      if (quote.status === "error") {
+        throw new Error(`Price lookup failed for ${symbol}: ${quote.message}`);
+      }
+
+      if (quote.close !== undefined) {
+        const currency =
+          quote.currency ??
+          (symbol.includes("/") ? symbol.split("/")[1] : undefined);
+
+        if (!currency) {
+          throw new Error(`No currency available for ${symbol}.`);
+        }
+
+        out[symbol] = {
+          price: Number(quote.close),
+          currency: currency.toUpperCase(),
+        };
+      }
+    }
+
+    return out;
+  });
+}
+/** Fetches quotes for multiple Yahoo symbols in multiple requests of a subset of tickers. */
+/* async function fetchYahooQuotesBatch(
+  symbols: string[],
+): Promise<Record<string, { price: number; currency: string }>> {
   if (symbols.length === 0) return {};
+
+  const quotes: Record<string, { price: number; currency: string }> = {};
+
+  // Keeping batches small is more reliable than one giant request.
+  const batches = chunkArray(symbols, 5);
+
+  for (const batch of batches) {
+    const partial = await withRetry(async () => {
+      const params = new URLSearchParams({
+        symbols: batch.join(","),
+      });
+
+      const response = await fetch(`${YAHOO_QUOTE}?${params}`);
+
+      if (!response.ok) {
+        throw new Error(`Batch price lookup failed (${response.status}).`);
+      }
+
+      const data = await response.json() as {
+        quoteResponse: {
+          result: Array<{
+            symbol: string;
+            regularMarketPrice?: number;
+            currency?: string;
+          }>;
+        };
+      };
+
+      const result: Record<string, { price: number; currency: string }> = {};
+
+      for (const quote of data.quoteResponse.result) {
+        if (quote.regularMarketPrice && quote.currency) {
+          result[quote.symbol] = {
+            price: quote.regularMarketPrice,
+            currency: quote.currency.toUpperCase(),
+          };
+        }
+      }
+
+      return result;
+    });
+
+    Object.assign(quotes, partial);
+
+    // Small pause to reduce the chance of consecutive 429s.
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  return quotes;
+}*/
+
+function toTwelveDataSymbol(ticker: string, quoteSymbol?: string): string {
+  if (quoteSymbol) return quoteSymbol;
+  const hk = /^(\d+)\.HK$/i.exec(ticker);
+  if (hk) return `${hk[1].padStart(4, "0")}:HKEX`;
+  return ticker;
+}
+
+interface TwelveDataQuote { symbol: string; currency?: string; close?: string; status?: string; message?: string; }
+
+async function fetchTwelveDataQuotesBatch(symbols: string[]): Promise<Record<string, { price: number; currency: string }>> {
+  if (symbols.length === 0) return {};
+  if (!TWELVE_DATA_KEY) throw new Error("Missing VITE_TWELVEDATA_API_KEY in .env.");
 
   const cacheKey = `quotes:${[...symbols].sort().join(",")}`;
   const cached = readCache<Record<string, { price: number; currency: string }>>(cacheKey);
   if (cached) return cached;
 
-  const result = await withRetry(async () => {
-    const params = new URLSearchParams({ symbols: symbols.join(",") });
-    const response = await fetch(`${YAHOO_QUOTE}?${params}`);
-    if (!response.ok) throw new Error(`Batch price lookup failed (${response.status}).`);
+  const chunks = chunk(symbols, TWELVE_DATA_CHUNK_SIZE);
+  const result: Record<string, { price: number; currency: string }> = {};
 
-    const data = (await response.json()) as {
-      quoteResponse: { result: Array<{ symbol: string; regularMarketPrice?: number; currency?: string }>; error?: unknown };
-    };
-    const out: Record<string, { price: number; currency: string }> = {};
-    for (const quote of data.quoteResponse.result) {
-      if (quote.regularMarketPrice && quote.currency) {
-        out[quote.symbol] = { price: quote.regularMarketPrice, currency: quote.currency.toUpperCase() };
-      }
-    }
-    return out;
-  });
+  for (let i = 0; i < chunks.length; i++) {
+    Object.assign(result, await fetchTwelveDataQuoteChunk(chunks[i]));
+    if (i < chunks.length - 1) await new Promise((resolve) => setTimeout(resolve, TWELVE_DATA_CHUNK_DELAY_MS));
+  }
 
   writeCache(cacheKey, result);
   return result;
@@ -228,29 +339,65 @@ export async function fetchMarketSnapshot(
 
   // Yahoo: resolve symbols and fetch all quotes in a single batched request.
   if (yahooTickers.length > 0) {
-    const symbolToTicker = new Map<string, string>();
+  /*  const symbolToTicker = new Map<string, string>();
     for (const ticker of yahooTickers) {
       const asset = structure.assets[ticker];
       const symbol = resolveQuoteSymbol(ticker, asset.quoteSymbol);
       symbolToTicker.set(symbol, ticker);
     }
 
-    const quotes = await fetchYahooQuotesBatch([...symbolToTicker.keys()]);
+    const quotes = await fetchYahooQuotesBatch([...symbolToTicker.keys()]); */
+// Build mapping: Twelve Data symbol -> one or more portfolio tickers.
+    const symbolToTickers = new Map<string, string[]>();
 
-    for (const [symbol, ticker] of symbolToTicker) {
-      const quote = quotes[symbol];
-      if (!quote) throw new Error(`Price lookup failed for ${symbol}: no quote returned.`);
+    for (const ticker of yahooTickers) {
       const asset = structure.assets[ticker];
-      const code = quote.currency.toUpperCase();
-      if (exchangeRates[code] === undefined) {
-        exchangeRates = { ...exchangeRates, ...(await fetchExchangeRatesToEur([code])) };
+      const symbol = toTwelveDataSymbol(ticker, asset.quoteSymbol);
+
+      const tickers = symbolToTickers.get(symbol);
+      if (tickers) {
+        tickers.push(ticker);
+      } else {
+        symbolToTickers.set(symbol, [ticker]);
       }
+    }
+
+    // Fetch each unique quote only once.
+    const quotes = await fetchTwelveDataQuotesBatch([...symbolToTickers.keys()]);
+
+    for (const [symbol, tickers] of symbolToTickers) {
+      const quote = quotes[symbol];
+
+      if (!quote) {
+        throw new Error(`Price lookup failed for ${symbol}: no quote returned.`);
+      }
+
+      const code = quote.currency.toUpperCase();
+
+      if (exchangeRates[code] === undefined) {
+        exchangeRates = {
+          ...exchangeRates,
+          ...(await fetchExchangeRatesToEur([code])),
+        };
+      }
+
       const rate = exchangeRates[code];
-      if (rate === undefined) throw new Error(`No exchange rate available for ${quote.currency}.`);
-      instruments[ticker] = { name: asset.name ?? ticker, currentPrice: quote.price * rate };
+
+      if (rate === undefined) {
+        throw new Error(`No exchange rate available for ${quote.currency}.`);
+      }
+
+      // Apply the same fetched quote to every portfolio asset using this symbol.
+      for (const ticker of tickers) {
+        const asset = structure.assets[ticker];
+
+        instruments[ticker] = {
+          name: asset.name ?? ticker,
+          currentPrice: quote.price * rate,
+        };
+      }
     }
   }
-
   return { fetchedAt: new Date(), exchangeRates, instruments };
 }
 
