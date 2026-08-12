@@ -85,7 +85,7 @@ This tool helps identify why your dashboard shows >10k difference from your
 source transaction app by analyzing:
   1. Historical FX rate issues (EUR, USD, HKD)
   2. Historical price issues (BTC, ETH)
-  3. US ADR vs EU listing symbol mismatches
+  3. US ADR vs native listing symbol mismatches
   4. Combined impact of multiple issues
 `);
 }
@@ -111,6 +111,63 @@ async function loadYamlFile(path: string): Promise<string> {
 }
 
 // ============================================================================
+// CSV PARSING UTILITIES (to read original currencies before conversion)
+// ============================================================================
+
+interface RawTransaction {
+  symbol: string;
+  date: string;
+  quantity: number;
+  price: number;
+  priceCurrency: string;
+  feesPercentage: number;
+  feesAmount: number;
+  feesCurrency: string;
+}
+
+function parseRawCsv(csvText: string): RawTransaction[] {
+  const rows = csvText.split("\n").filter(r => r.trim());
+  if (rows.length < 2) return [];
+  
+  const header = rows[0].split(/[,\s;]+/).map(h => h.trim().toLowerCase());
+  
+  const getColIndex = (name: string) => {
+    return header.findIndex(h => h.includes(name.toLowerCase()));
+  };
+  
+  const symbolIdx = getColIndex("symbol");
+  const dateIdx = getColIndex("date");
+  const quantityIdx = getColIndex("quantity");
+  const priceIdx = getColIndex("price");
+  const priceCurrencyIdx = getColIndex("price currency");
+  const feesPercentageIdx = getColIndex("fees percentage");
+  const feesAmountIdx = getColIndex("fees amount");
+  const feesCurrencyIdx = getColIndex("fees currency");
+  
+  const transactions: RawTransaction[] = [];
+  
+  for (let i = 1; i < rows.length; i++) {
+    const cols = rows[i].split(/[,\s;]+/).map(c => c.trim());
+    if (cols.filter(c => c).length < 3) continue;
+    
+    const transaction: RawTransaction = {
+      symbol: cols[symbolIdx]?.toUpperCase() || "",
+      date: cols[dateIdx] || "",
+      quantity: parseFloat(cols[quantityIdx] || "0"),
+      price: parseFloat(cols[priceIdx] || "0"),
+      priceCurrency: cols[priceCurrencyIdx]?.toUpperCase() || "EUR",
+      feesPercentage: parseFloat(cols[feesPercentageIdx] || "0"),
+      feesAmount: parseFloat(cols[feesAmountIdx] || "0"),
+      feesCurrency: cols[feesCurrencyIdx]?.toUpperCase() || "EUR",
+    };
+    
+    transactions.push(transaction);
+  }
+  
+  return transactions;
+}
+
+// ============================================================================
 // DIAGNOSTIC FUNCTIONS
 // ============================================================================
 
@@ -123,11 +180,10 @@ function diagnoseFxRateIssue() {
   console.log("DIAGNOSIS #1: Historical FX/Crypto Rate Issue");
   console.log("=".repeat(80));
   
-  // FX rate examples
   console.log("\n--- Fiat Currency Examples (EUR, USD, HKD) ---");
   
-  const usdHistorical = 1.10; // EUR/USD 3 months ago
-  const usdCurrent = 0.92;   // EUR/USD today
+  const usdHistorical = 1.10;
+  const usdCurrent = 0.92;
   const usdAmount = 10000;
   const usdCorrect = usdAmount / usdHistorical;
   const usdWrong = usdAmount / usdCurrent;
@@ -140,8 +196,8 @@ function diagnoseFxRateIssue() {
   console.log(`  Current code calculates: ${usdWrong.toFixed(2)} EUR`);
   console.log(`  Error: ${usdError.toFixed(2)} EUR (${((usdError/usdCorrect)*100).toFixed(1)}%)`);
   
-  const hkdHistorical = 8.5; // HKD/EUR 3 months ago (1 EUR = 8.5 HKD, so 1 HKD = 1/8.5 EUR)
-  const hkdCurrent = 8.8;   // HKD/EUR today
+  const hkdHistorical = 8.5;
+  const hkdCurrent = 8.8;
   const hkdAmount = 100000;
   const hkdCorrect = hkdAmount / hkdHistorical;
   const hkdWrong = hkdAmount / hkdCurrent;
@@ -154,12 +210,11 @@ function diagnoseFxRateIssue() {
   console.log(`  Current code calculates: ${hkdWrong.toFixed(2)} EUR`);
   console.log(`  Error: ${hkdError.toFixed(2)} EUR (${((hkdError/hkdCorrect)*100).toFixed(1)}%)`);
   
-  // Crypto examples
   console.log("\n--- Crypto Currency Examples (BTC, ETH) ---");
   console.log("Note: For crypto, the 'exchange rate' is the price in EUR");
   
-  const btcHistorical = 40000; // BTC/EUR 3 months ago
-  const btcCurrent = 50000;   // BTC/EUR today
+  const btcHistorical = 40000;
+  const btcCurrent = 50000;
   const btcAmount = 1;
   const btcError = btcCurrent - btcHistorical;
   
@@ -170,8 +225,8 @@ function diagnoseFxRateIssue() {
   console.log(`  Current code uses: ${btcCurrent.toFixed(2)} EUR`);
   console.log(`  Error on cost basis: ${btcError.toFixed(2)} EUR (${((btcError/btcHistorical)*100).toFixed(1)}%)`);
   
-  const ethHistorical = 2000; // ETH/EUR 3 months ago
-  const ethCurrent = 2500;   // ETH/EUR today
+  const ethHistorical = 2000;
+  const ethCurrent = 2500;
   const ethAmount = 10;
   const ethError = (ethCurrent - ethHistorical) * ethAmount;
   
@@ -199,9 +254,8 @@ function diagnoseAdrIssue() {
   console.log("- EU stocks: ASML.AS (Euronext) vs ASML (NASDAQ) - DIFFERENT!");
   console.log("- HK stocks: 700.HK vs 0700.HK vs 0700:HKEX - may differ");
   
-  // Example: ASML
-  const asmlEuronextPrice = 700;  // EUR per share
-  const asmlNasdaqPrice = 750;     // USD per ADR
+  const asmlEuronextPrice = 700;
+  const asmlNasdaqPrice = 750;
   const eurUsd = 1.08;
   
   const sharesOwned = 100;
@@ -217,7 +271,6 @@ function diagnoseAdrIssue() {
   console.log(`  Dashboard (using NASDAQ): ${wrongValueEur.toFixed(2)} EUR`);
   console.log(`  Error: ${error.toFixed(2)} EUR (${((error/correctValueEur)*100).toFixed(1)}%)`);
   
-  // ADR ratio example
   console.log(`\n--- ADR Ratio Example ---`);
   console.log(`Some ADRs represent multiple underlying shares:`);
   console.log(`Example: 1 ING.NYSE ADR = 2 INGA.AS shares`);
@@ -260,9 +313,9 @@ function diagnoseCombinedImpact() {
   
   for (const scenario of scenarios) {
     const usdPortion = scenario.usdValue;
-    const hkdPortion = scenario.hkdValue / 8.5; // Convert HKD to EUR equivalent
-    const btcPortion = scenario.btcAmount * 45000; // BTC at ~45k EUR
-    const ethPortion = scenario.ethAmount * 2250; // ETH at ~2.25k EUR
+    const hkdPortion = scenario.hkdValue / 8.5;
+    const btcPortion = scenario.btcAmount * 45000;
+    const ethPortion = scenario.ethAmount * 2250;
     const totalEur = usdPortion + hkdPortion + btcPortion + ethPortion;
     
     const fxError = (usdPortion + hkdPortion) * scenario.fxRateChange;
@@ -293,70 +346,60 @@ async function analyzeActualData(
   console.log("=".repeat(80));
   
   try {
-    console.log("\nParsing your transaction CSV...");
+    // Parse RAW CSV to get original currencies (before conversion)
+    const rawTransactions = parseRawCsv(csvText);
     
-    // First, scan CSV to get currencies and tickers
-    const rows = csvText.split("\n").filter(r => r.trim());
-    if (rows.length < 2) {
-      console.log("  No transactions found in CSV");
+    if (rawTransactions.length === 0) {
+      console.log("\nNo transactions found in CSV");
       return;
     }
     
-    const header = rows[0].split(/[,\s;]+/).map(h => h.trim().toLowerCase());
-    const symbolIdx = header.findIndex(h => h.includes("symbol"));
-    const dateIdx = header.findIndex(h => h.includes("date"));
-    const quantityIdx = header.findIndex(h => h.includes("quantity"));
-    const priceIdx = header.findIndex(h => h.includes("price") && !h.includes("currency"));
-    const priceCurrencyIdx = header.findIndex(h => h.includes("price") && h.includes("currency"));
-    const feesAmountIdx = header.findIndex(h => h.includes("fees") && h.includes("amount"));
-    const feesCurrencyIdx = header.findIndex(h => h.includes("fees") && h.includes("currency"));
+    console.log(`\nFound ${rawTransactions.length} transactions`);
     
-    // Collect all currencies used
-    const currencies = new Set<string>();
+    // Collect all unique tickers and currencies
     const tickers = new Set<string>();
-    const transactionsByCurrency: Record<string, { count: number; totalAmount: number; sample: string }> = {};
+    const priceCurrencies = new Set<string>();
+    const feesCurrencies = new Set<string>();
+    const transactionsByCurrency: Record<string, { count: number; totalAmount: number; sampleTickers: string[] }> = {};
     
-    for (let i = 1; i < rows.length; i++) {
-      const cols = rows[i].split(/[,\s;]+/).map(c => c.trim());
-      if (cols.filter(c => c).length < 3) continue; // Skip empty rows
+    for (const txn of rawTransactions) {
+      tickers.add(txn.symbol);
+      priceCurrencies.add(txn.priceCurrency);
+      feesCurrencies.add(txn.feesCurrency);
       
-      const symbol = cols[symbolIdx]?.toUpperCase() || "";
-      const priceCurrency = cols[priceCurrencyIdx]?.toUpperCase() || structure.currency;
-      const feesCurrency = cols[feesCurrencyIdx]?.toUpperCase() || structure.currency;
-      const quantity = parseFloat(cols[quantityIdx] || "0");
-      const price = parseFloat(cols[priceIdx] || "0");
+      const amount = txn.quantity * txn.price;
       
-      tickers.add(symbol);
-      currencies.add(priceCurrency);
-      currencies.add(feesCurrency);
-      
-      const amount = quantity * price;
-      
-      if (!transactionsByCurrency[priceCurrency]) {
-        transactionsByCurrency[priceCurrency] = { count: 0, totalAmount: 0, sample: symbol };
+      if (!transactionsByCurrency[txn.priceCurrency]) {
+        transactionsByCurrency[txn.priceCurrency] = { count: 0, totalAmount: 0, sampleTickers: [] };
       }
-      transactionsByCurrency[priceCurrency].count++;
-      transactionsByCurrency[priceCurrency].totalAmount += amount;
+      transactionsByCurrency[txn.priceCurrency].count++;
+      transactionsByCurrency[txn.priceCurrency].totalAmount += amount;
+      if (transactionsByCurrency[txn.priceCurrency].sampleTickers.length < 3) {
+        transactionsByCurrency[txn.priceCurrency].sampleTickers.push(txn.symbol);
+      }
     }
     
-    console.log(`\nFound ${rows.length - 1} transactions`);
+    const allCurrencies = new Set([...priceCurrencies, ...feesCurrencies]);
+    
     console.log(`  Tickers: ${[...tickers].slice(0, 10).join(", ")}${tickers.size > 10 ? "..." : ""}`);
-    console.log(`  Currencies: ${[...currencies].join(", ")}`);
+    console.log(`  Price Currencies: ${[...priceCurrencies].join(", ")}`);
+    console.log(`  Fees Currencies: ${[...feesCurrencies].join(", ")}`);
     
     // Check for unsupported currencies
-    const unsupported = [...currencies].filter(c => !SUPPORTED_CURRENCIES.includes(c));
+    const unsupported = [...allCurrencies].filter(c => !SUPPORTED_CURRENCIES.includes(c));
     if (unsupported.length > 0) {
       console.log(`\n  WARNING: Found unsupported currencies: ${unsupported.join(", ")}`);
       console.log(`  Supported currencies: ${SUPPORTED_CURRENCIES.join(", ")}`);
     }
     
     // Show breakdown by currency
-    console.log("\nTransaction breakdown by currency:");
+    console.log("\nTransaction breakdown by PRICE currency:");
     for (const [currency, info] of Object.entries(transactionsByCurrency)) {
-      console.log(`  ${currency}: ${info.count} transactions, total amount: ${info.totalAmount.toFixed(2)} ${currency}`);
+      console.log(`  ${currency}: ${info.count} transactions, total: ${info.totalAmount.toFixed(2)} ${currency}`);
+      console.log(`         Sample tickers: ${info.sampleTickers.join(", ")}`);
     }
     
-    // Build config for parsing
+    // Now parse with portfolio config to see converted values
     const rates: Record<string, number> = { EUR: 1, USD: 0.92, HKD: 0.115, BTC: 50000, ETH: 2500 };
     const instruments: Record<string, { name?: string; currentPrice: number }> = {};
     
@@ -367,7 +410,6 @@ async function analyzeActualData(
       };
     }
     
-    // Override with manual rates if available
     if (structure.manualRates) {
       for (const [currency, rate] of Object.entries(structure.manualRates)) {
         rates[currency.toUpperCase()] = rate;
@@ -381,34 +423,31 @@ async function analyzeActualData(
       actionAliases: structure.actionAliases,
     };
     
-    // Parse transactions
-    const transactions = parseTransactionsCsv(csvText, config);
-    
-    console.log(`\nParsed ${transactions.length} transactions successfully:`);
-    for (const txn of transactions.slice(0, 5)) {
-      const value = txn.quantity * txn.price;
-      console.log(`  ${txn.date.toISOString().split("T")[0]}: ${txn.quantity} ${txn.ticker} @ ${txn.price.toFixed(2)} ${config.currency} = ${value.toFixed(2)} ${config.currency}`);
+    // Try to parse with config
+    let parsedTransactions: any[] = [];
+    try {
+      parsedTransactions = parseTransactionsCsv(csvText, config);
+      console.log(`\nParsed ${parsedTransactions.length} transactions (converted to ${config.currency}):`);
+      for (const txn of parsedTransactions.slice(0, 5)) {
+        const value = txn.quantity * txn.price;
+        console.log(`  ${txn.date.toISOString().split("T")[0]}: ${txn.quantity} ${txn.ticker} @ ${txn.price.toFixed(2)} ${config.currency} = ${value.toFixed(2)} ${config.currency}`);
+      }
+      if (parsedTransactions.length > 5) {
+        console.log(`  ... and ${parsedTransactions.length - 5} more`);
+      }
+    } catch (parseError) {
+      console.log(`\n  WARNING: Could not parse transactions with portfolio config: ${parseError}`);
     }
-    if (transactions.length > 5) {
-      console.log(`  ... and ${transactions.length - 5} more`);
-    }
     
-    console.log("\nIMPORTANT: Check if the values above match your source app!");
+    console.log("\nIMPORTANT: Compare the converted values above with your source app!");
     console.log("   If they differ, it is the FX rate issue (Issue #1).");
     
     // Check for potential issues
     console.log("\nChecking for potential issues...");
     
-    // Check for non-EUR base currency transactions
-    const nonBaseCurrencyTxns = transactions.filter(t => {
-      // We can't directly check original currency from parsed data,
-      // but we can check if the config has exchange rates for other currencies
-      return true;
-    });
-    
     // Check which currencies have exchange rates
     const missingRates: string[] = [];
-    for (const currency of [...currencies]) {
+    for (const currency of [...allCurrencies]) {
       if (currency !== structure.currency && !rates[currency]) {
         missingRates.push(currency);
       }
@@ -417,6 +456,15 @@ async function analyzeActualData(
     if (missingRates.length > 0) {
       console.log(`  ERROR: Missing exchange rates for: ${missingRates.join(", ")}`);
       console.log(`  Add these to your portfolio.yml exchange_rates section`);
+    }
+    
+    // Check for currency conversion issues
+    const nonBaseCurrencies = [...priceCurrencies].filter(c => c !== structure.currency);
+    if (nonBaseCurrencies.length > 0) {
+      console.log(`\n  FOUND: Transactions in non-base currencies: ${nonBaseCurrencies.join(", ")}`);
+      console.log(`  These are converted using CURRENT exchange rates from portfolio.yml`);
+      console.log(`  This causes errors if rates have changed since transaction dates!`);
+      console.log(`  FIX: Use historical FX rates for each transaction date`);
     }
     
     // Check for potential ADR issues
@@ -428,6 +476,8 @@ async function analyzeActualData(
       const isEuStock = /\.(AS|AMS|L|DE|PA|BR|HE|MU|ST)$/i.test(ticker);
       const isUsSymbol = /^[A-Z]{1,5}$/i.test(quoteSymbol) && !quoteSymbol.includes(".");
       const isHkStock = /\.HK$/i.test(ticker) || /:HKEX$/i.test(ticker);
+      const isFStock = /\.F$/i.test(ticker);
+      const isCrypto = /\.CRYPTO$/i.test(ticker);
       
       if (isEuStock && isUsSymbol) {
         console.log(`  WARNING: ${ticker} (EU stock) uses US symbol: ${quoteSymbol}`);
@@ -435,13 +485,38 @@ async function analyzeActualData(
       }
       
       if (isHkStock) {
-        console.log(`  INFO: ${ticker} is a Hong Kong stock - verify symbol format`);
+        console.log(`  INFO: ${ticker} is a Hong Kong stock`);
         if (quoteSymbol !== ticker) {
           console.log(`        Using quote_symbol: ${quoteSymbol}`);
+          if (quoteSymbol === "TCEHY") {
+            console.log(`        WARNING: TCEHY is Tencent ADR (OTC), not HKEX listing!`);
+            console.log(`        Consider using: 0700.HK or 700.HK`);
+          }
         }
       }
       
-      if (quoteSymbol !== ticker) {
+      if (isFStock) {
+        console.log(`  INFO: ${ticker} is a Frankfurt stock (.F)`);
+        if (quoteSymbol !== ticker) {
+          console.log(`        Using quote_symbol: ${quoteSymbol}`);
+          if (quoteSymbol.includes("VYM") || quoteSymbol.includes("URTH") || quoteSymbol.includes("VT")) {
+            console.log(`        WARNING: This appears to be a US ETF symbol, not Frankfurt!`);
+          }
+        }
+      }
+      
+      if (isCrypto) {
+        console.log(`  INFO: ${ticker} is a crypto asset`);
+        if (quoteSymbol !== ticker) {
+          console.log(`        Using quote_symbol: ${quoteSymbol}`);
+          if (quoteSymbol.includes("/USD")) {
+            console.log(`        WARNING: Using /USD pair, but your base is ${structure.currency}`);
+            console.log(`        Consider using: ${ticker.replace(".CRYPTO", "")}/${structure.currency} or just ${ticker.replace(".CRYPTO", "")}`);
+          }
+        }
+      }
+      
+      if (quoteSymbol !== ticker && !isEuStock && !isHkStock && !isFStock && !isCrypto) {
         console.log(`  INFO: ${ticker} uses quote_symbol override: ${quoteSymbol}`);
       }
     }
@@ -457,7 +532,7 @@ async function analyzeActualData(
     
     // Check for crypto transactions
     const cryptoCurrencies = ["BTC", "ETH"];
-    const hasCrypto = [...currencies].some(c => cryptoCurrencies.includes(c));
+    const hasCrypto = [...priceCurrencies].some(c => cryptoCurrencies.includes(c));
     if (hasCrypto) {
       console.log("\n  NOTE: Crypto transactions (BTC, ETH) use current prices for cost basis.");
       console.log("        This can cause large discrepancies. Use historical prices!");
@@ -474,6 +549,68 @@ async function analyzeActualData(
   } catch (error) {
     console.error("Error analyzing data:", error);
   }
+}
+
+// ============================================================================
+// SYMBOL MAPPING GUIDE
+// ============================================================================
+
+function printSymbolMappingGuide() {
+  console.log("\n" + "=".repeat(80));
+  console.log("SYMBOL MAPPING GUIDE FOR TWELVE DATA & YAHOO APIs");
+  console.log("=".repeat(80));
+  
+  console.log("\nYour portfolio.yml uses quote_symbol overrides. Here's how to map them:");
+  console.log("\n--- Hong Kong Stocks (HKEX) ---");
+  console.log("Tencent Holdings:");
+  console.log("  700.HK -> 0700.HK (Yahoo Finance)");
+  console.log("  700.HK -> 0700:HKEX (Twelve Data)");
+  console.log("  NOTE: TCEHY is OTC ADR (US), NOT HKEX listing!");
+  console.log("        TCEHY price != 700.HK price");
+  
+  console.log("\n--- Frankfurt Stocks (.F) ---");
+  console.log("These are UCITS ETFs listed in Frankfurt:");
+  console.log("  VWCE.F -> VWCE.DE (Yahoo) or VWCE:GR (Twelve Data)");
+  console.log("  IWDA.AS -> IWDA.AS (Yahoo) or IWDA:AS (Twelve Data)");
+  console.log("  AMEW.F -> AMEW.DE (Yahoo) or AMEW:GR (Twelve Data)");
+  console.log("  IUSN.F -> IUSN.DE (Yahoo) or IUSN:GR (Twelve Data)");
+  console.log("  NVD.F -> NVDA (Yahoo) - This is WRONG! NVD.F is Frankfurt, NVDA is NASDAQ");
+  console.log("  VHYL.AS -> VHYL.AS (Yahoo) - NOT VYM (VYM is US ETF)");
+  console.log("  VGWD.F -> VGWD.DE (Yahoo) - NOT VYM");
+  
+  console.log("\n--- US Stocks ---");
+  console.log("These should use their primary exchange:");
+  console.log("  AAPL -> AAPL (NASDAQ)");
+  console.log("  AMZN -> AMZN (NASDAQ)");
+  console.log("  MSFT -> MSFT (NASDAQ)");
+  console.log("  NVDA -> NVDA (NASDAQ) - NOT NVD.F");
+  
+  console.log("\n--- Crypto ---");
+  console.log("For CoinGecko API (used by your app):");
+  console.log("  BTC.CRYPTO -> BTC (CoinGecko ID: bitcoin)");
+  console.log("  ETH.CRYPTO -> ETH (CoinGecko ID: ethereum)");
+  console.log("  NOTE: Your portfolio.yml uses BTC/USD and ETH/USD");
+  console.log("        This may cause issues if your base currency is EUR");
+  console.log("        Consider using BTC-EUR and ETH-EUR pairs");
+  
+  console.log("\n--- Twelve Data Free Tier Notes ---");
+  console.log("Twelve Data free tier supports:");
+  console.log("  - US stocks: AAPL, MSFT, AMZN, etc. (NASDAQ/NYSE)");
+  console.log("  - EU stocks: Use .DE, .AS, .L suffixes");
+  console.log("  - HK stocks: Use :HKEX suffix (e.g., 0700:HKEX)");
+  console.log("  - Does NOT support EU markets for free (except via suffixes)");
+  console.log("\nYahoo Finance supports:");
+  console.log("  - US stocks: AAPL, MSFT, etc.");
+  console.log("  - EU stocks: Use .AS, .DE, .L, etc.");
+  console.log("  - HK stocks: Use .HK suffix (e.g., 0700.HK)");
+  console.log("  - Crypto: NOT supported (use CoinGecko)");
+  
+  console.log("\nRECOMMENDATION:");
+  console.log("  1. For HK stocks: Use 0700.HK (Yahoo) or 0700:HKEX (Twelve Data)");
+  console.log("  2. For Frankfurt ETFs: Use .DE suffix (Yahoo) or :GR (Twelve Data)");
+  console.log("  3. For US stocks: Use primary ticker (AAPL, MSFT, etc.)");
+  console.log("  4. For crypto: Use BTC, ETH (CoinGecko)");
+  console.log("  5. REMOVE quote_symbol overrides that map to wrong exchanges!");
 }
 
 // ============================================================================
@@ -516,6 +653,9 @@ async function main(): Promise<void> {
     diagnoseCombinedImpact();
     await analyzeActualData(csvText, structure);
     
+    // Print symbol mapping guide
+    printSymbolMappingGuide();
+    
     console.log("\n" + "=".repeat(80));
     console.log("SUMMARY & RECOMMENDATIONS");
     console.log("=".repeat(80));
@@ -535,11 +675,11 @@ CRITICAL ISSUES (Fix these FIRST):
    - FIX: Store historical crypto prices or fetch prices for each transaction date
    - Example: 1 BTC bought at 40k EUR but current price is 50k EUR = 10k EUR error!
 
-3. US ADR SYMBOLS
-   - If you're using US symbols (AAPL, MSFT) for non-US stocks (ASML.AS, 700.HK)
-   - Prices can differ by 10-50%+ due to ADR ratios and market differences
-   - FIX: Use the EXACT same tickers as in your source app
-   - Check portfolio.yml for quote_symbol overrides
+3. SYMBOL MAPPING ISSUES
+   - Your portfolio.yml has INCORRECT quote_symbol overrides
+   - TCEHY is Tencent ADR (OTC), NOT 700.HK (HKEX) - different prices!
+   - VYM, URTH, VT are US ETFs, NOT Frankfurt/Euronext listings
+   - FIX: Use native exchange symbols or remove incorrect overrides
 
 SECONDARY ISSUES:
 
@@ -553,12 +693,11 @@ SECONDARY ISSUES:
 
 NEXT STEPS:
 
-1. Review the warnings above for your specific configuration
-2. Fix the FX rate issue first (highest impact for USD, HKD)
-3. Fix the crypto price issue (highest impact for BTC, ETH)
-4. Then verify all symbol mappings
-5. Finally, check price sources
-6. Use the historical-rates.ts module for proper FX rate handling
+1. Review the SYMBOL MAPPING GUIDE above for your specific configuration
+2. Fix the quote_symbol overrides in portfolio.yml (highest priority!)
+3. Fix the FX rate issue for USD, HKD transactions
+4. Fix the crypto price issue for BTC, ETH transactions
+5. Use the historical-rates.ts module for proper FX rate handling
 `);
 
   } catch (error) {
