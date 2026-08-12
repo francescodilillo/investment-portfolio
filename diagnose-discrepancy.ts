@@ -377,12 +377,26 @@ async function analyzeActualData(
       if (transactionsByCurrency[txn.priceCurrency].sampleTickers.length < 3) {
         transactionsByCurrency[txn.priceCurrency].sampleTickers.push(txn.symbol);
       }
+    
+    // IMPORTANT: Check if Price Currency column has original currencies
+    // even if the Price column is already in EUR (pre-converted by source app)
+    const hasOriginalCurrencies = priceCurrencies.size > 1 || [...priceCurrencies].some(c => c !== "EUR");
+    
+    if (!hasOriginalCurrencies && [...priceCurrencies].length > 0) {
+      console.log("\n  ⚠️  NOTE: All Price Currency values are EUR.");
+      console.log("        This means your CSV has PRE-CONVERTED values.");
+      console.log("        The original currencies may be in a different column or lost during export.");
+      console.log("        Check if your source app has an option to export in ORIGINAL currencies.");
+    }
     }
     
     const allCurrencies = new Set([...priceCurrencies, ...feesCurrencies]);
     
     console.log(`  Tickers: ${[...tickers].slice(0, 10).join(", ")}${tickers.size > 10 ? "..." : ""}`);
     console.log(`  Price Currencies: ${[...priceCurrencies].join(", ")}`);
+    // Debug: Show first few raw currency values to verify
+    const sampleCurrencies = rawTransactions.slice(0, 10).map(t => t.priceCurrency);
+    console.log(`  Sample Price Currencies (first 10): ${sampleCurrencies.join(", ")}`);
     console.log(`  Fees Currencies: ${[...feesCurrencies].join(", ")}`);
     
     // Check for unsupported currencies
