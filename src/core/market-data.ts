@@ -13,6 +13,7 @@ const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const CACHE_PREFIX = "market-cache:";
 const TWELVE_DATA_CHUNK_SIZE = 7;
 const TWELVE_DATA_CHUNK_DELAY_MS = 61_000;
+const FALLBACK_DELAY_MS = 2000; // Delay before falling back to Yahoo
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -30,7 +31,7 @@ function readCache<T>(key: string): T | null {
     if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
     return entry.value;
   } catch {
-    return null; // corrupt or unavailable storage — just refetch
+    return null; // corrupt or unavailable storage  just refetch
   }
 }
 
@@ -39,7 +40,7 @@ function writeCache<T>(key: string, value: T): void {
     const entry: CacheEntry<T> = { value, fetchedAt: Date.now() };
     localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(entry));
   } catch {
-    // storage full or unavailable — caching is best-effort, not required
+    // storage full or unavailable  caching is best-effort, not required
   }
 }
 
@@ -134,6 +135,19 @@ export async function fetchExchangeRatesToEur(currencies: string[]): Promise<Rec
   return rates;
 }
 
+/** Convert Twelve Data symbol format to Yahoo Finance symbol format */
+function convertToYahooSymbol(twelveDataSymbol: string): string {
+  // Handle Hong Kong stocks: 0700:HKEX -> 0700.HK
+  const hkexMatch = /^(\d+):HKEX$/i.exec(twelveDataSymbol);
+  if (hkexMatch) {
+    return `${hkexMatch[1]}.HK`;
+  }
+  // Handle other formats as needed
+  return twelveDataSymbol.replace(/:/g, '.');
+}
+
+interface TwelveDataQuote { symbol: string; currency?: string; close?: string; status?: string; message?: string; }
+
 async function fetchTwelveDataQuoteChunk(
   symbols: string[],
 ): Promise<Record<string, { price: number; currency: string }>> {
@@ -154,10 +168,14 @@ async function fetchTwelveDataQuoteChunk(
       symbols.length === 1 ? { [symbols[0]]: data } : data;
 
     const out: Record<string, { price: number; currency: string }> = {};
+    const failedSymbols: string[] = [];
 
     for (const [symbol, quote] of Object.entries(quotes)) {
       if (quote.status === "error") {
-        throw new Error(`Price lookup failed for ${symbol}: ${quote.message}`);
+        // Instead of throwing, collect failed symbols for fallback
+        console.warn(`TWELVE DATA: Error for ${symbol}: ${quote.message || 'Unknown error'}`);
+        failedSymbols.push(symbol);
+        continue;
       }
 
       if (quote.close !== undefined) {
@@ -166,13 +184,38 @@ async function fetchTwelveDataQuoteChunk(
           (symbol.includes("/") ? symbol.split("/")[1] : undefined);
 
         if (!currency) {
-          throw new Error(`No currency available for ${symbol}.`);
+          console.warn(`TWELVE DATA: No currency available for ${symbol}`);
+          failedSymbols.push(symbol);
+          continue;
         }
 
         out[symbol] = {
           price: Number(quote.close),
           currency: currency.toUpperCase(),
         };
+      } else {
+        // No close price available
+        console.warn(`TWELVE DATA: No close price available for ${symbol}`);
+        failedSymbols.push(symbol);
+      }
+    }
+
+    // If there are failed symbols, try to fetch them from Yahoo after a delay
+    if (failedSymbols.length > 0) {
+      console.warn(`TWELVE DATA: ${failedSymbols.length} symbols failed, falling back to Yahoo:`, failedSymbols);
+      await new Promise((resolve) => setTimeout(resolve, FALLBACK_DELAY_MS));
+      
+      for (const symbol of failedSymbols) {
+        try {
+          // Convert Twelve Data symbol to Yahoo symbol for fallback
+          const yahooSymbol = convertToYahooSymbol(symbol);
+          const yahooQuote = await fetchYahooQuote(yahooSymbol);
+          out[symbol] = yahooQuote;
+          console.log(`TWELVE DATA fallback: Successfully fetched ${symbol} from Yahoo as ${yahooSymbol}`);
+        } catch (fallbackError) {
+          console.error(`TWELVE DATA fallback: Failed to fetch ${symbol} from Yahoo:`, fallbackError);
+          // Don't throw here - we'll handle missing quotes later
+        }
       }
     }
 
@@ -241,8 +284,6 @@ function toTwelveDataSymbol(ticker: string, quoteSymbol?: string): string {
   if (hk) return `${hk[1].padStart(4, "0")}:HKEX`;
   return ticker;
 }
-
-interface TwelveDataQuote { symbol: string; currency?: string; close?: string; status?: string; message?: string; }
 
 async function fetchTwelveDataQuotesBatch(symbols: string[]): Promise<Record<string, { price: number; currency: string }>> {
   if (symbols.length === 0) return {};
@@ -369,7 +410,39 @@ export async function fetchMarketSnapshot(
       const quote = quotes[symbol];
 
       if (!quote) {
-        throw new Error(`Price lookup failed for ${symbol}: no quote returned.`);
+        // If Twelve Data + Yahoo fallback failed, try direct Yahoo with the original ticker
+        console.warn(`Both TWELVE DATA and fallback failed for ${symbol}, trying direct Yahoo...`);
+        try {
+          // Try to get the original ticker from the symbol mapping
+          const originalTicker = tickers[0];
+          const yahooSymbol = resolveQuoteSymbol(originalTicker, structure.assets[originalTicker]?.quoteSymbol);
+          const directQuote = await fetchYahooQuote(yahooSymbol);
+          
+          const code = directQuote.currency.toUpperCase();
+          if (exchangeRates[code] === undefined) {
+            exchangeRates = {
+              ...exchangeRates,
+              ...(await fetchExchangeRatesToEur([code])),
+            };
+          }
+          const rate = exchangeRates[code];
+          if (rate === undefined) {
+            throw new Error(`No exchange rate available for ${directQuote.currency}.`);
+          }
+          
+          // Apply to all tickers using this symbol
+          for (const ticker of tickers) {
+            const asset = structure.assets[ticker];
+            instruments[ticker] = {
+              name: asset.name ?? ticker,
+              currentPrice: directQuote.price * rate,
+            };
+          }
+          continue;
+        } catch (directError) {
+          console.error(`Direct Yahoo fallback also failed for ${symbol}:`, directError);
+          throw new Error(`Price lookup failed for ${symbol}: no quote returned from any source.`);
+        }
       }
 
       const code = quote.currency.toUpperCase();
