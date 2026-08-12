@@ -5,7 +5,7 @@ Dashboard shows >10k difference compared to ground truth from source transaction
 
 ## Root Cause Analysis
 
-### 🔴 CRITICAL ISSUE #1: Historical FX Rate Problem
+### CRITICAL ISSUE #1: Historical FX Rate Problem
 
 **Location**: `src/core/parser.ts` lines 27-28
 
@@ -17,20 +17,19 @@ price:number(g("price"),line,"price")*pr,  // Uses today's EUR/USD rate
 fees:number(g("feesamount"),line,"fees amount")*fr,  // Uses today's EUR/USD rate
 ```
 
-**Impact**: If EUR/USD has moved significantly since your purchase dates, this creates a systematic error in your cost basis calculation.
+**Impact**: If exchange rates have moved significantly since your purchase dates, this creates a systematic error in your cost basis calculation.
 
-**Example**: 
-- You bought $10,000 of stock when EUR/USD = 1.10
-- Today EUR/USD = 1.05
-- Current code calculates: $10,000 * 1.05 = €9,523.81
-- Correct calculation: $10,000 * 1.10 = €9,090.91
-- **Error: €433 on this single transaction**
+**Examples**: 
+- EUR/USD: Bought $10,000 when EUR/USD = 1.10, today = 1.05 → Error: ~€433 per transaction
+- EUR/HKD: Bought HKD 100,000 when EUR/HKD = 8.5, today = 8.8 → Error: ~€380 per transaction
+- BTC/EUR: Bought 1 BTC when BTC/EUR = 40,000, today = 50,000 → Error: ~€10,000 on cost basis
+- ETH/EUR: Bought 10 ETH when ETH/EUR = 2,000, today = 2,500 → Error: ~€5,000 on cost basis
 
-**Solution Required**: Store historical FX rates or fetch rates for transaction dates.
+**Solution Required**: Store historical FX rates or fetch rates for each transaction date.
 
 ---
 
-### 🔴 CRITICAL ISSUE #2: USA Equivalent Shares (ADR Problem)
+### CRITICAL ISSUE #2: USA Equivalent Shares (ADR Problem)
 
 **Your hypothesis**: "I'm pulling the USA equivalent of the shares I did buy"
 
@@ -38,7 +37,7 @@ fees:number(g("feesamount"),line,"fees amount")*fr,  // Uses today's EUR/USD rat
 
 **How ADRs cause discrepancies**:
 
-1. **ADR Ratio**: Many EU companies have ADRs that represent multiple underlying shares
+1. **ADR Ratio**: Many companies have ADRs that represent multiple underlying shares
    - Example: ING Groep (INGA.AS) has ADR ING.NYSE where 1 ADR = 2 ordinary shares
    - If you bought 100 underlying shares but the dashboard uses ADR price, it's off by 2x
 
@@ -46,40 +45,40 @@ fees:number(g("feesamount"),line,"fees amount")*fr,  // Uses today's EUR/USD rat
    - Example: ASML.AS (Euronext) vs ASML (NASDAQ)
    - These can differ by more than 10% due to market dynamics
 
-3. **Currency**: ADRs are USD-denominated, underlying might be EUR
+3. **Currency**: ADRs are USD-denominated, underlying might be EUR or HKD
 
-**Check your portfolio.yml**: Look for `quote_symbol` overrides. If you're using US symbols for EU stocks, this is the issue.
-
-**Solution**: Use the **exact same ticker** as in your source app, or ensure proper symbol mapping.
+**Check your portfolio.yml**: Look for `quote_symbol` overrides. If you're using US symbols for non-US stocks, this is the issue.
 
 ---
 
-### 🟡 POTENTIAL ISSUE #3: Current Price vs Historical Price
+### POTENTIAL ISSUE #3: Crypto Currency Handling
 
-**Location**: `src/core/portfolio.ts` line 26
+**Supported currencies**: EUR, USD, HKD, BTC, ETH
 
-```typescript
-const marketValue = position.quantity * instrument.currentPrice;
-```
+**Issue**: Crypto prices (BTC, ETH) are highly volatile. Using current prices for historical transactions causes massive cost basis errors.
 
-This uses **current** prices to calculate market value, which is correct for a dashboard showing current portfolio value.
+**Example**: 
+- Bought 1 BTC at €40,000 on 2023-01-01
+- Today BTC = €50,000
+- Current code: Uses €50,000 for cost basis calculation (WRONG)
+- Correct: Should use €40,000 for cost basis (the actual purchase price)
+- **Error on cost basis: €10,000 for just 1 BTC**
 
-**However**: If your source app is showing a different "current" value, check:
-1. Are you using the same price source?
-2. Are the prices from the same timestamp?
-3. Are you using bid/ask/mid prices consistently?
+**Note**: The current code in `market-data.ts` fetches crypto prices from CoinGecko, but the parser still uses current FX rates for historical transactions.
 
 ---
 
-### 🟡 POTENTIAL ISSUE #4: Fee Calculation
+### POTENTIAL ISSUE #4: Hong Kong Stock Exchange (HKD) Handling
 
-**Location**: `src/core/parser.ts` line 28
+**Issue**: HKD-denominated stocks (e.g., 700.HK, 0700.HK) may have:
+- Different price sources (Yahoo vs Twelve Data)
+- Different symbol formats (700.HK vs 0700:HKEX)
+- Currency conversion issues (HKD to EUR)
 
-```typescript
-fees:number(g("feesamount"),line,"fees amount")*fr,
-```
-
-Fees are also converted using current FX rates. If fees were significant and EUR/USD has moved, this adds to the discrepancy.
+**Check**: 
+- Are your HKD transactions using the correct exchange rate?
+- Are the HKD stock prices being fetched correctly?
+- Are symbol mappings correct in portfolio.yml?
 
 ---
 
@@ -87,28 +86,35 @@ Fees are also converted using current FX rates. If fees were significant and EUR
 
 ### Step 1: Verify Symbol Mapping
 ```bash
-# Check if you're using US symbols for EU stocks
+# Check if you're using US symbols for non-US stocks
 grep -r "quote_symbol" portfolio.yml
 ```
 
 Look for any entries like:
 ```yaml
 assets:
-  "ASML":
-    quote_symbol: "ASML"  # This is NASDAQ, not Euronext!
+  "700.HK":
+    quote_symbol: "0700.HK"  # This should be correct for HKEX
+  "ASML.AS":
+    quote_symbol: "ASML"  # This is WRONG - using NASDAQ instead of Euronext
 ```
 
 ### Step 2: Check Currency Handling
 ```bash
 # Check your base currency setting
 grep -A2 "base_currency" portfolio.yml
+
+# Check exchange rates
+grep -A10 "exchange_rates" portfolio.yml
 ```
+
+Ensure you have exchange rates for all currencies you use: EUR, USD, HKD, BTC, ETH
 
 ### Step 3: Compare a Single Transaction
 
-Pick one transaction and manually calculate:
+Pick one transaction in each currency (EUR, USD, HKD, BTC, ETH) and manually calculate:
 
-1. **Source App Value**: Ask your source app for the EUR value of one specific transaction
+1. **Source App Value**: Ask your source app for the EUR value of the transaction
 2. **Dashboard Calculation**: 
    - Transaction price in original currency × quantity = local value
    - Local value × exchange rate (from portfolio.yml) = EUR value
@@ -118,8 +124,8 @@ Pick one transaction and manually calculate:
 
 ```bash
 # When were your major transactions?
-# What was EUR/USD on those dates?
-# What is EUR/USD today?
+# What was EUR/USD, EUR/HKD, BTC/EUR, ETH/EUR on those dates?
+# What are they today?
 ```
 
 If the difference is significant (>5%), this is contributing to the error.
@@ -148,49 +154,62 @@ const historicalRate = config.historicalExchangeRates[txnDate]?.[pc];
 const price = number(g("price"), line, "price") * (historicalRate || config.exchangeRates[pc]);
 ```
 
+**Implementation available**: See `src/core/historical-rates.ts` and `src/core/parser-historical.ts`
+
 ### Fix 2: Verify and Correct Symbol Mappings (HIGH PRIORITY)
 
-Ensure all EU stocks use their native exchange symbols:
+Ensure all stocks use their native exchange symbols:
 
 ```yaml
-# WRONG (using US ADR)
+# CORRECT (using native exchanges)
 assets:
-  "ASML":
-    name: ASML Holding
-    quote_symbol: "ASML"  # NASDAQ
-
-# CORRECT (using Euronext)
-assets:
+  "700.HK":
+    name: Tencent Holdings
+    quote_symbol: "0700.HK"  # or "700.HK" depending on your data source
+  
   "ASML.AS":
     name: ASML Holding
     quote_symbol: "ASML.AS"  # Euronext Amsterdam
+  
+  "AAPL":
+    name: Apple Inc
+    quote_symbol: "AAPL"  # NASDAQ (correct for US stocks)
 ```
 
-### Fix 3: Add Debug Logging (MEDIUM PRIORITY)
+### Fix 3: Add Exchange Rates for All Currencies (MEDIUM PRIORITY)
 
-Add logging to trace the calculation:
+Ensure your portfolio.yml has exchange rates for EUR, USD, HKD, BTC, ETH:
 
-```typescript
-// In parser.ts
-console.log(`Transaction ${line}: ${ticker} ${quantity} @ ${price} ${pc} = ${amount} EUR (rate: ${pr})`);
+```yaml
+exchange_rates:
+  EUR: 1
+  USD: 0.92    # 1 USD = 0.92 EUR
+  HKD: 0.115   # 1 HKD = 0.115 EUR
+  BTC: 50000   # 1 BTC = 50,000 EUR (current price, but should be historical!)
+  ETH: 2500    # 1 ETH = 2,500 EUR (current price, but should be historical!)
 ```
+
+**Note**: For BTC and ETH, the "exchange rate" is actually the price in EUR. This is correct for the current implementation, but for historical accuracy, you need historical prices.
 
 ---
 
 ## Quick Test
 
-To quickly verify if it's the ADR issue:
+To quickly verify the issues:
 
-1. Find your largest holding
-2. Check its ticker in portfolio.yml
-3. Compare the price from Twelve Data/Yahoo with your source app
-4. If prices differ by >10%, it's a symbol mapping issue
+1. **Find your largest transaction in each currency** (EUR, USD, HKD, BTC, ETH)
+2. **Check its value in your source app**
+3. **Compare with dashboard value**
+4. **If they differ by >5%**, you have an FX rate or symbol mapping issue
 
-To verify if it's the FX rate issue:
+### Example Test Cases:
 
-1. Calculate portfolio value using **today's** FX rates for all transactions
-2. Calculate portfolio value using **historical** FX rates for each transaction
-3. Compare the difference
+| Currency | Transaction | Source App Value | Dashboard Value | Difference | Issue |
+|----------|-------------|------------------|-----------------|------------|-------|
+| USD | $10,000 AAPL | €9,090 | €10,870 | +€1,780 | FX Rate |
+| HKD | HKD 100,000 700.HK | €11,500 | €11,800 | +€300 | FX Rate |
+| BTC | 1 BTC | €40,000 | €50,000 | +€10,000 | Historical Price |
+| ETH | 10 ETH | €20,000 | €25,000 | +€5,000 | Historical Price |
 
 ---
 
@@ -198,11 +217,12 @@ To verify if it's the FX rate issue:
 
 Based on typical scenarios:
 
-| Issue | Potential Impact | Likelihood |
-|-------|------------------|------------|
-| ADR Symbol Mismatch | 10-50% difference | HIGH |
-| Historical FX Rates | 5-20% difference | HIGH |
-| Current Price Source | 1-5% difference | MEDIUM |
-| Fee Calculation | <1% difference | LOW |
+| Issue | Potential Impact | Likelihood | Currencies Affected |
+|-------|------------------|------------|---------------------|
+| Historical FX Rates | 5-20%+ difference | HIGH | USD, HKD |
+| ADR Symbol Mismatch | 10-50%+ difference | HIGH | All |
+| Crypto Historical Prices | 20-100%+ difference | HIGH | BTC, ETH |
+| Current Price Source | 1-5% difference | MEDIUM | All |
+| Fee Calculation | <1% difference | LOW | All |
 
-**Conclusion**: The ADR issue and historical FX rate issue combined can easily explain a >10k discrepancy.
+**Conclusion**: The combination of historical FX rate issues (for USD, HKD) and historical price issues (for BTC, ETH) can easily explain a >10k discrepancy.
